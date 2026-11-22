@@ -11,13 +11,13 @@
   "activation": {
     "onStartup": true
   },
+  "skills": [
+    "./skills"
+  ],
   "contracts": {
     "tools": [
       "shop_search",
       "check_twice"
     ]
-  },
-  "skills": [
-    "./skills"
-  ]
+  }
 }

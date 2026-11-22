@@ -5,7 +5,7 @@ description: Find five real Christmas gifts from real online stores, each with a
 
 # Speedy shopper
 
-Make the list from stores' live catalogues, then check it twice. Every gift on the list is a real product page that answered a moment ago. Never list a product, price or link you did not get from a tool in this turn.
+Make the list from stores' live catalogues, then check it twice. Every gift on the list is a real product page that answered a moment ago. Never list a product, price or link that `check_twice` did not return as `verified` in this turn; print each gift's `found` title, price and URL, not your own wording.
 
 ## Steps
 
@@ -22,15 +22,15 @@ Make the list from stores' live catalogues, then check it twice. Every gift on t
    | Desk, grooming, beauty | ugmonk.com, beardbrand.com, glossier.com, puravidabracelets.com, loopearplugs.com |
 
    Other Shopify stores work too; a store that errors is skipped, not retried.
-3. **Pick five.** From the results, choose 5 in-stock products within budget, from at least 3 different stores. No gift cards, gift notes, subscriptions, memberships, bundles of the same item, or anything over budget.
-4. **Check twice.** One `check_twice` call with the exact name, price and URL of all 5. Any gift whose verdict is not `verified` is swapped for another product from the search results, and the swaps are checked again. Stop when 5 are verified.
+3. **Pick seven.** From the results, choose 7 in-stock products within budget (5 picks and 2 spares), from at least 3 different stores, in the store's currency. No gift cards, gift notes, subscriptions, memberships, replacement parts, refills, shipping protection, bundles of the same item, or anything over budget.
+4. **Check twice.** One `check_twice` call with all 7, each with the store's own title (the brand may go in front), price, currency and URL exactly as `shop_search` returned them. Keep the first 5 whose verdict is `verified`. If fewer than 5 pass, run one more `shop_search` and one more `check_twice` for the gap, then reply with however many passed and say so.
 5. **Reply** with the list in this shape and nothing before it:
 
    ```
    🎄 5 gifts for <person>, checked twice
 
-   1. **<name>** — <price> · <store>
-      <url>
+   1. **<found.title>** — <found.price> · <store>
+      <found.url>
       ✓✓ <one line on why it suits them>
    ...
 

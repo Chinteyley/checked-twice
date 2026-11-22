@@ -1,106 +1,101 @@
 import { describe, expect, it } from "vitest";
-import { checkGift } from "./check.js";
-import { searchStore, type Fetch } from "./shop.js";
+import { checkGift, type Claim } from "./check.js";
+import { searchStore, type Get } from "./shop.js";
 
-// A fake store: each path answers with a fixed status and body, like the real endpoints do.
-function store(routes: Record<string, { status?: number; json?: unknown; html?: string }>): Fetch {
-  return (async (input: string | URL | Request) => {
-    const url = new URL(String(input));
-    const route = routes[url.pathname];
-    if (!route) return new Response("not found", { status: 404 });
-    if (route.html !== undefined)
-      return new Response(route.html, { status: route.status ?? 200, headers: { "content-type": "text/html" } });
-    return new Response(JSON.stringify(route.json), {
-      status: route.status ?? 200,
-      headers: { "content-type": "application/json" },
-    });
-  }) as Fetch;
+interface Route {
+  status?: number;
+  body: unknown;
 }
 
-const cap = { title: "Single Haul Cap", price: 4000, price_min: 4000, price_max: 4000, available: true, vendor: "Simms" };
-const cart = { "/cart.js": { json: { currency: "USD" } } };
+// A fake store: each path answers with a fixed status and body, the way the real endpoints do.
+function store(routes: Record<string, Route>): Get {
+  return async (url) => {
+    const route = routes[new URL(url).pathname];
+    if (!route) return { status: 404, url, body: "not found" };
+    const body = typeof route.body === "string" ? route.body : JSON.stringify(route.body);
+    return { status: route.status ?? 200, url, body };
+  };
+}
+
+const CAP_URL = "https://www.simmsfishing.com/products/single-haul-cap";
+const cart = { "/cart.js": { body: { currency: "USD" } } };
+const cap = {
+  title: "Single Haul Cap",
+  vendor: "Simms",
+  variants: [
+    { id: 1, price: 4000, available: false },
+    { id: 2, price: 8000, available: true },
+  ],
+};
+const capStore = store({ ...cart, "/products/single-haul-cap.js": { body: cap } });
+const claim = (over: Partial<Claim>): Claim => ({ name: "Simms Single Haul Cap", price: 80, currency: "USD", url: CAP_URL, ...over });
+
+function ldPage(nodes: unknown): string {
+  return `<html><script type="application/ld+json">${JSON.stringify(nodes)}</script></html>`;
+}
 
 describe("checkGift", () => {
-  it("verifies a listed gift against the store's live product JSON", async () => {
-    const fetchImpl = store({ ...cart, "/products/single-haul-cap.js": { json: cap } });
-    const result = await checkGift(fetchImpl, {
-      name: "Simms Single Haul Cap",
-      price: 40,
-      url: "https://www.simmsfishing.com/products/single-haul-cap",
-    });
+  it("verifies the store's title at the price an in-stock variant charges", async () => {
+    const result = await checkGift(capStore, claim({}));
     expect(result.verdict).toBe("verified");
-    expect(result.found?.price).toBe(40);
+    expect(result.found).toMatchObject({ title: "Single Haul Cap", price: 80, currency: "USD" });
   });
 
-  it("catches a listed price the store no longer charges", async () => {
-    const fetchImpl = store({ ...cart, "/products/single-haul-cap.js": { json: cap } });
-    const result = await checkGift(fetchImpl, {
-      name: "Single Haul Cap",
-      price: 29.99,
-      url: "https://www.simmsfishing.com/products/single-haul-cap",
-    });
-    expect(result.verdict).toBe("price_changed");
+  it("rejects a sold-out variant's price, a made-up price, and a sold-out variant link", async () => {
+    expect((await checkGift(capStore, claim({ price: 40 }))).verdict).toBe("price_changed");
+    expect((await checkGift(capStore, claim({ price: 60 }))).verdict).toBe("price_changed");
+    expect((await checkGift(capStore, claim({ price: 40, url: `${CAP_URL}?variant=1` }))).verdict).toBe("sold_out");
   });
 
-  it("catches a link that points at a different product", async () => {
-    const fetchImpl = store({ ...cart, "/products/single-haul-cap.js": { json: cap } });
-    const result = await checkGift(fetchImpl, {
-      name: "Waterproof Wading Boots",
-      price: 40,
-      url: "https://www.simmsfishing.com/products/single-haul-cap",
-    });
-    expect(result.verdict).toBe("name_mismatch");
+  it("rejects a name that only shares the brand or some words", async () => {
+    expect((await checkGift(capStore, claim({ name: "Simms Wading Boots" }))).verdict).toBe("name_mismatch");
+    expect((await checkGift(capStore, claim({ name: "Simms Single Haul Cap Bundle" }))).verdict).toBe("name_mismatch");
   });
 
-  it("rejects sold-out gifts and made-up links", async () => {
-    const fetchImpl = store({ ...cart, "/products/single-haul-cap.js": { json: { ...cap, available: false } } });
-    const soldOut = await checkGift(fetchImpl, {
-      name: "Single Haul Cap",
-      price: 40,
-      url: "https://www.simmsfishing.com/products/single-haul-cap",
+  it("matches accented titles and schema.org IRIs", async () => {
+    const shop = store({
+      "/item/creme": { body: ldPage({ "@type": "https://schema.org/Product", name: "Crème Brûlée Torch", brand: { name: "Fièvre" }, offers: { "@type": "Offer", price: "25", priceCurrency: "USD", availability: "https://schema.org/InStock" } }) },
     });
-    const madeUp = await checkGift(fetchImpl, {
-      name: "Golden Reel",
-      price: 99,
-      url: "https://www.simmsfishing.com/products/golden-reel",
-    });
-    expect(soldOut.verdict).toBe("sold_out");
-    expect(madeUp.verdict).toBe("not_found");
+    expect((await checkGift(shop, { name: "Fievre Creme Brulee Torch", price: 25, currency: "USD", url: "https://shop.example/item/creme" })).verdict).toBe("verified");
   });
 
-  it("reads schema.org Product markup on stores without product JSON, and reports bot walls", async () => {
-    const page = `<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Product","name":"Cast Iron Skillet","offers":{"@type":"Offer","price":"34.95","priceCurrency":"USD","availability":"https://schema.org/InStock"}}]}</script>`;
-    const fetchImpl = store({ "/item/skillet": { html: page }, "/item/blocked": { status: 403, html: "denied" } });
-    const ok = await checkGift(fetchImpl, { name: "Cast Iron Skillet", price: 34.95, url: "https://shop.example/item/skillet" });
-    const blocked = await checkGift(fetchImpl, { name: "Thing", price: 1, url: "https://shop.example/item/blocked" });
-    expect(ok.verdict).toBe("verified");
-    expect(blocked.verdict).toBe("blocked");
+  it("rejects the wrong currency, made-up links and non-https URLs", async () => {
+    expect((await checkGift(capStore, claim({ currency: "EUR" }))).verdict).toBe("currency_mismatch");
+    expect((await checkGift(capStore, claim({ url: "https://www.simmsfishing.com/products/golden-reel" }))).verdict).toBe("not_found");
+    const page = ldPage({ "@type": "Product", name: "Golden Reel", offers: { "@type": "Offer", price: "99", priceCurrency: "USD", availability: "https://schema.org/InStock" } });
+    expect((await checkGift(capStore, claim({ name: "Golden Reel", price: 99, url: `data:text/html,${page}` }))).verdict).toBe("not_found");
+  });
+
+  it("reads a non-Shopify page's own Product, but not one listed inside a collection", async () => {
+    const offer = { "@type": "Offer", price: "34.95", priceCurrency: "USD", availability: "https://schema.org/InStock" };
+    const shop = store({
+      "/products/skillet": { body: ldPage({ "@graph": [{ "@type": "Product", name: "Cast Iron Skillet", offers: offer }] }) },
+      "/collections/pans": { body: ldPage({ "@type": "ItemList", itemListElement: [{ "@type": "Product", name: "Cast Iron Skillet", offers: offer }] }) },
+      "/item/blocked": { status: 403, body: "denied" },
+    });
+    const skillet = { name: "Cast Iron Skillet", price: 34.95, currency: "USD" };
+    expect((await checkGift(shop, { ...skillet, url: "https://shop.example/products/skillet" })).verdict).toBe("verified");
+    expect((await checkGift(shop, { ...skillet, url: "https://shop.example/collections/pans" })).verdict).toBe("not_a_product");
+    expect((await checkGift(shop, { ...skillet, url: "https://shop.example/item/blocked" })).verdict).toBe("blocked");
   });
 });
 
 describe("searchStore", () => {
-  it("maps a store's own search results to absolute product links with live prices", async () => {
-    const fetchImpl = store({
+  it("maps a store's own search results to absolute links with live prices and its currency", async () => {
+    const shop = store({
       ...cart,
       "/search/suggest.json": {
-        json: {
-          resources: {
-            results: {
-              products: [
-                { title: "Single Haul Cap", url: "/products/single-haul-cap?_pos=1&_ss=e", price: "40.00", available: true },
-              ],
-            },
-          },
-        },
+        body: { resources: { results: { products: [{ title: "Single Haul Cap", url: "/products/single-haul-cap?_pos=1&_ss=e", price: "40.00" }] } } },
       },
     });
-    const [product] = await searchStore(fetchImpl, "simmsfishing.com", "cap", 4);
-    expect(product).toMatchObject({
+    const [listing] = await searchStore(shop, "simmsfishing.com", "cap", 4);
+    expect(listing).toEqual({
       title: "Single Haul Cap",
       url: "https://simmsfishing.com/products/single-haul-cap",
+      store: "simmsfishing.com",
       price: 40,
       currency: "USD",
-      available: true,
+      vendor: undefined,
     });
   });
 });
