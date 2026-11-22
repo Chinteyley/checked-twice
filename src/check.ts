@@ -38,8 +38,9 @@ function normalize(text: string): string {
     .replace(/[™®℠'’]/g, "")
     .normalize("NFKD")
     .replace(/(?<=[A-Za-z])\p{M}+/gu, "")
+    .normalize("NFC")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, " ")
     .trim();
 }
 
@@ -59,7 +60,9 @@ export function judge(claim: Claim, product: Product): Checked {
   const claimUrl = new URL(claim.url);
   const variantId = claimUrl.searchParams.get("variant");
   const hasVariants = product.offers.some((o) => o.variantId !== undefined);
-  const offers = variantId && hasVariants ? product.offers.filter((o) => o.variantId === variantId) : product.offers;
+  // A link to one variant is only checked against that variant; a page that can't name it fails.
+  if (variantId && !hasVariants) return { claim, verdict: "not_found", note: "can't confirm that variant on this page" };
+  const offers = variantId ? product.offers.filter((o) => o.variantId === variantId) : product.offers;
   if (offers.length === 0) return { claim, verdict: "not_found", note: "that variant is not on the product page" };
 
   const inCurrency = offers.filter((o) => o.currency.toUpperCase() === claim.currency.toUpperCase());
@@ -95,7 +98,12 @@ const FAILURE_NOTES: Record<ReadFailure, string> = {
 
 export async function checkGift(get: Get, claim: Claim, signal?: AbortSignal): Promise<Checked> {
   const deadline = AbortSignal.timeout(CHECK_DEADLINE_MS);
-  const read = await readProduct(get, claim.url, signal ? AbortSignal.any([signal, deadline]) : deadline);
-  if (!read.ok) return { claim, verdict: read.failure, note: FAILURE_NOTES[read.failure] };
-  return judge(claim, read.product);
+  try {
+    const read = await readProduct(get, claim.url, signal ? AbortSignal.any([signal, deadline]) : deadline);
+    if (!read.ok) return { claim, verdict: read.failure, note: FAILURE_NOTES[read.failure] };
+    return judge(claim, read.product);
+  } catch {
+    // One odd store fails its own gift, never the whole batch.
+    return { claim, verdict: "unreachable", note: FAILURE_NOTES.unreachable };
+  }
 }

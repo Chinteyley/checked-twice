@@ -58,6 +58,8 @@ describe("checkGift", () => {
     expect((await checkGift(capStore, claim({ name: "Simms Haul Single Cap" }))).verdict).toBe("name_mismatch");
     expect(nameMatches("FlowState Tumbler", "FlowState™ Tumbler")).toBe(true);
     expect(nameMatches("ハック", "バッグ")).toBe(false);
+    expect(nameMatches("バッグ", "パッグ")).toBe(false);
+    expect(nameMatches("Creme Brulee", "Crème Brûlée")).toBe(true);
   });
 
   it("matches accented titles and schema.org IRIs", async () => {
@@ -74,6 +76,10 @@ describe("checkGift", () => {
     ];
     const shop = store({ "/item/reel": { body: ldPage({ "@type": "Product", name: "Fly Reel", offers }) } });
     expect((await checkGift(shop, { name: "Fly Reel", price: 85, currency: "USD", url: "https://shop.example/item/reel" })).verdict).toBe("sold_out");
+    const notIn = [{ "@type": "Offer", price: "85", priceCurrency: "USD", availability: "https://schema.org/NotInStock" }];
+    const shop2 = store({ "/item/reel": { body: ldPage({ "@type": "Product", name: "Fly Reel", offers: notIn }) } });
+    expect((await checkGift(shop2, { name: "Fly Reel", price: 85, currency: "USD", url: "https://shop.example/item/reel" })).verdict).toBe("sold_out");
+    expect((await checkGift(shop2, { name: "Fly Reel", price: 85, currency: "USD", url: "https://shop.example/item/reel?variant=7" })).verdict).toBe("not_found");
   });
 
   it("rejects the wrong currency, made-up links and non-https URLs", async () => {
@@ -81,6 +87,12 @@ describe("checkGift", () => {
     expect((await checkGift(capStore, claim({ url: "https://www.simmsfishing.com/products/golden-reel" }))).verdict).toBe("not_found");
     const page = ldPage({ "@type": "Product", name: "Golden Reel", offers: { "@type": "Offer", price: "99", priceCurrency: "USD", availability: "https://schema.org/InStock" } });
     expect((await checkGift(capStore, claim({ name: "Golden Reel", price: 99, url: `data:text/html,${page}` }))).verdict).toBe("not_found");
+  });
+
+  it("survives a store that returns odd JSON", async () => {
+    const odd = store({ ...cart, ...capPage, "/products/single-haul-cap.js": { body: { ...cap, vendor: null } } });
+    expect((await checkGift(odd, claim({ name: "Simms Single Haul Cap" }))).verdict).toBe("name_mismatch");
+    expect((await checkGift(odd, claim({ name: "Single Haul Cap" }))).verdict).toBe("verified");
   });
 
   it("rejects a product whose JSON outlives its page", async () => {

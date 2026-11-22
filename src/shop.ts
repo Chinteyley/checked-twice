@@ -176,7 +176,7 @@ interface ShopifyVariant {
 
 interface ShopifyProduct {
   title: string;
-  vendor?: string;
+  vendor?: unknown;
   variants: ShopifyVariant[];
 }
 
@@ -227,7 +227,9 @@ export async function readProduct(get: Get, rawUrl: string, signal?: AbortSignal
       ]);
       // The page the person will open must be live and still a product page.
       if (BLOCKED_STATUSES.has(page.status)) return { ok: false, failure: "blocked" };
-      if (GONE_STATUSES.has(page.status) || !new URL(page.url || url.href).pathname.includes("/products/"))
+      // ...and still this product: a retired handle that redirects elsewhere is gone.
+      const handle = (p: string) => p.replace(/\/$/, "").replace(/\.(js|json)$/, "").split("/products/")[1] ?? "";
+      if (GONE_STATUSES.has(page.status) || handle(new URL(page.url || url.href).pathname) !== handle(url.pathname))
         return { ok: false, failure: "not_found" };
       if (page.status !== 200) return { ok: false, failure: "unreachable" };
       // Shopify serves this as text/javascript, so parse the body rather than trust the header.
@@ -243,7 +245,7 @@ export async function readProduct(get: Get, rawUrl: string, signal?: AbortSignal
             title: data.title,
             url: `${final.origin}${final.pathname.replace(/\.js$/, "")}${url.search}`,
             store: final.host,
-            vendor: data.vendor,
+            vendor: typeof data.vendor === "string" ? data.vendor : undefined,
             offers,
           },
         };
@@ -281,19 +283,24 @@ function offersOf(node: JsonObject): Offer[] {
     const price = Number(o.price);
     const currency = typeof o.priceCurrency === "string" ? o.priceCurrency.trim() : "";
     if (!(price > 0) || !currency || typeof o.availability !== "string") return [];
-    return [{ price, currency, available: /InStock$/.test(o.availability) }];
+    // An offer past its priceValidUntil no longer stands.
+    if (typeof o.priceValidUntil === "string" && Date.parse(o.priceValidUntil) < Date.now()) return [];
+    return [{ price, currency, available: IN_STOCK.test(o.availability) }];
   });
   return [...offers, ...variants];
 }
 
 const LISTING_TYPES = ["ItemList", "CollectionPage", "SearchResultsPage"];
+const IN_STOCK = /^(?:https?:\/\/schema\.org\/|schema:)?InStock$/;
+const HTML_COMMENT = /<!--[\s\S]*?-->/g;
 
 /**
  * The page's own Product: the one top-level schema.org Product (or member of its @graph). A page
  * that declares itself a listing, or carries several products, is not a product page.
  */
 export function productFromHtml(html: string, pageUrl: string): Product | undefined {
-  const nodes = [...html.matchAll(LD_JSON)]
+  // JSON-LD left inside an HTML comment is not on the page.
+  const nodes = [...html.replace(HTML_COMMENT, "").matchAll(LD_JSON)]
     .flatMap(([, json]) => list(parseJson(json)))
     .filter(isObject)
     .flatMap((n) => (Array.isArray(n["@graph"]) ? n["@graph"] : [n]))
