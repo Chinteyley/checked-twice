@@ -33,10 +33,11 @@ const CHECK_DEADLINE_MS = 6000;
 
 /** Lowercase letters and digits in order, marks and symbols dropped: "Micra®" is "micra". */
 function normalize(text: string): string {
+  // Symbols go before NFKD, which would turn ™ into "TM"; accents fold only on Latin letters.
   return text
-    .normalize("NFKD")
-    .replace(/\p{M}+/gu, "")
     .replace(/[™®℠'’]/g, "")
+    .normalize("NFKD")
+    .replace(/(?<=[A-Za-z])\p{M}+/gu, "")
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
@@ -53,7 +54,6 @@ function money(amount: number, currency: string): string {
   return `${currency === "USD" ? "$" : `${currency} `}${amount.toFixed(2)}`;
 }
 
-const cents = (amount: number): number => Math.round(amount * 100);
 
 export function judge(claim: Claim, product: Product): Checked {
   const claimUrl = new URL(claim.url);
@@ -72,7 +72,7 @@ export function judge(claim: Claim, product: Product): Checked {
     return { claim, verdict: "name_mismatch", found, note: `page is ${live}; list the store's own title` };
   if (inCurrency.length === 0) return { claim, verdict: "currency_mismatch", found, note: `store prices in ${shown.currency}` };
   if (inStock.length === 0) return { claim, verdict: "sold_out", found, note: `${product.title} is sold out` };
-  const match = inStock.find((o) => cents(o.price) === cents(claim.price));
+  const match = inStock.find((o) => Math.abs(o.price - claim.price) < 1e-9);
   if (!match)
     return { claim, verdict: "price_changed", found, note: `listed ${money(claim.price, shown.currency)}; in stock at ${money(shown.price, shown.currency)}` };
   // Open the link on the variant that carries this price, not whichever the store shows first.

@@ -46,7 +46,7 @@ export default defineToolPlugin({
       name: "check_twice",
       label: "Check twice",
       description:
-        "Re-read each gift's product page live from its store and confirm the store's own title, an in-stock price and the currency. Pass 6-7 candidates; list only gifts whose verdict is 'verified', using each one's `found` title, price and URL.",
+        "Re-read each gift's product page live from its store and confirm the store's own title, an in-stock price and the currency. Pass up to 7 candidates at once; list only gifts whose verdict is 'verified', printing each one's `found` title, price, currency and URL.",
       workspaceAccess: false,
       parameters: Type.Object({
         gifts: Type.Array(

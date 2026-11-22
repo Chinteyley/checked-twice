@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkGift, type Claim } from "./check.js";
+import { checkGift, nameMatches, type Claim } from "./check.js";
 import { searchStore, type Get } from "./shop.js";
 
 interface Route {
@@ -56,6 +56,8 @@ describe("checkGift", () => {
     expect((await checkGift(capStore, claim({ name: "Simms Wading Boots" }))).verdict).toBe("name_mismatch");
     expect((await checkGift(capStore, claim({ name: "Simms Single Haul Cap Bundle" }))).verdict).toBe("name_mismatch");
     expect((await checkGift(capStore, claim({ name: "Simms Haul Single Cap" }))).verdict).toBe("name_mismatch");
+    expect(nameMatches("FlowState Tumbler", "FlowState™ Tumbler")).toBe(true);
+    expect(nameMatches("ハック", "バッグ")).toBe(false);
   });
 
   it("matches accented titles and schema.org IRIs", async () => {
@@ -84,6 +86,8 @@ describe("checkGift", () => {
   it("rejects a product whose JSON outlives its page", async () => {
     const gone = store({ ...cart, "/products/single-haul-cap.js": { body: cap } });
     expect((await checkGift(gone, claim({}))).verdict).toBe("not_found");
+    const down = store({ ...cart, "/products/single-haul-cap.js": { body: cap }, "/products/single-haul-cap": { status: 500, body: "" } });
+    expect((await checkGift(down, claim({}))).verdict).toBe("unreachable");
   });
 
   it("reads a non-Shopify page's own Product, but not a listing page's", async () => {

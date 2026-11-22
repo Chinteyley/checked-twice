@@ -48,8 +48,8 @@ export type ReadFailure = "blocked" | "not_found" | "not_a_product" | "unreachab
 export type ReadResult = { ok: true; product: Product } | { ok: false; failure: ReadFailure };
 
 const REQUEST_TIMEOUT_MS = 4000;
-/** Product pages run to about 1 MB; anything far larger is not one. */
-const MAX_BODY_BYTES = 3_000_000;
+/** Product pages run to about 2 MB (HexClad's is 5.4 MB); anything far larger is not one. */
+const MAX_BODY_BYTES = 10_000_000;
 const MAX_REDIRECTS = 3;
 const HEADERS = {
   "user-agent":
@@ -214,23 +214,29 @@ export async function readProduct(get: Get, rawUrl: string, signal?: AbortSignal
   }
   if (url.protocol !== "https:") return { ok: false, failure: "not_found" };
   try {
-    const html = get(url.href, "text/html,application/xhtml+xml", signal);
     const at = url.pathname.indexOf("/products/");
+    const path = url.pathname.replace(/\/$/, "").replace(/\.(js|json)$/, "");
+    const html = get(`${url.origin}${path}${url.search}`, "text/html,application/xhtml+xml", signal);
     if (at >= 0) {
-      const path = url.pathname.replace(/\/$/, "").replace(/\.(js|json)$/, "");
       // `/en-ca/products/x` prices in that market; `/collections/c/products/x` is the root store.
       const storefront = `${url.origin}${url.pathname.slice(0, at).replace(/\/collections\/[^/]+$/, "")}`;
       const [json, currency, page] = await Promise.all([
-        get(`${url.origin}${path}.js`, "application/json", signal),
+        get(`${url.origin}${path}.js`, "application/json", signal).catch(() => undefined),
         storeCurrency(get, storefront, signal),
         html,
       ]);
-      if (GONE_STATUSES.has(page.status)) return { ok: false, failure: "not_found" };
+      // The page the person will open must be live and still a product page.
+      if (BLOCKED_STATUSES.has(page.status)) return { ok: false, failure: "blocked" };
+      if (GONE_STATUSES.has(page.status) || !new URL(page.url || url.href).pathname.includes("/products/"))
+        return { ok: false, failure: "not_found" };
+      if (page.status !== 200) return { ok: false, failure: "unreachable" };
       // Shopify serves this as text/javascript, so parse the body rather than trust the header.
-      const data = json.status === 200 ? parseJson(json.body) : undefined;
+      const data = json?.status === 200 ? parseJson(json.body) : undefined;
+      // A Shopify product whose currency can't be read is not guessed from the page.
+      if (isShopifyProduct(data) && !currency) return { ok: false, failure: "unreachable" };
       const offers = isShopifyProduct(data) && currency ? shopifyOffers(data.variants, currency) : [];
       if (isShopifyProduct(data) && offers.length > 0) {
-        const final = new URL(json.url || `${url.origin}${path}.js`);
+        const final = new URL(json?.url || `${url.origin}${path}.js`);
         return {
           ok: true,
           product: {
@@ -242,7 +248,7 @@ export async function readProduct(get: Get, rawUrl: string, signal?: AbortSignal
           },
         };
       }
-      // Not a Shopify product endpoint, or no currency: read the page itself.
+      // Not a Shopify product endpoint: read the page itself.
       return fromPage(page, url.href);
     }
     return fromPage(await html, url.href);
@@ -295,10 +301,11 @@ export function productFromHtml(html: string, pageUrl: string): Product | undefi
   if (nodes.some((n) => LISTING_TYPES.some((t) => hasType(n, t)))) return undefined;
   const products = nodes.filter((n) => hasType(n, "Product") || hasType(n, "ProductGroup"));
   if (new Set(products.map((p) => p.name)).size !== 1) return undefined;
+  // One product, sometimes in several blocks (a reviews widget adds its own): merge them.
   const [node] = products;
-  const offers = offersOf(node);
+  const offers = products.flatMap(offersOf);
   if (typeof node.name !== "string" || offers.length === 0) return undefined;
   const url = new URL(pageUrl);
-  const brand = isObject(node.brand) ? node.brand.name : node.brand;
+  const brand = products.map((p) => (isObject(p.brand) ? p.brand.name : p.brand)).find((b) => typeof b === "string");
   return { title: node.name, url: url.href, store: url.host, vendor: typeof brand === "string" ? brand : undefined, offers };
 }
