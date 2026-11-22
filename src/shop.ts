@@ -25,9 +25,10 @@ export interface Listing {
   vendor?: string;
 }
 
-/** One way to buy a product: a variant or a schema.org offer. */
+/** One way to buy a product: a variant or a schema.org offer, with its own currency. */
 export interface Offer {
   price: number;
+  currency: string;
   available: boolean;
   variantId?: string;
 }
@@ -37,7 +38,6 @@ export interface Product {
   title: string;
   url: string;
   store: string;
-  currency: string;
   vendor?: string;
   offers: Offer[];
 }
@@ -48,6 +48,8 @@ export type ReadFailure = "blocked" | "not_found" | "not_a_product" | "unreachab
 export type ReadResult = { ok: true; product: Product } | { ok: false; failure: ReadFailure };
 
 const REQUEST_TIMEOUT_MS = 4000;
+/** Product pages run to about 1 MB; anything far larger is not one. */
+const MAX_BODY_BYTES = 3_000_000;
 const MAX_REDIRECTS = 3;
 const HEADERS = {
   "user-agent":
@@ -73,11 +75,29 @@ export const guardedGet: Get = async (url, accept, signal) => {
     auditContext: "checked-twice",
   });
   try {
-    return { status: response.status, url: finalUrl, body: await response.text() };
+    return { status: response.status, url: finalUrl, body: await readCapped(response) };
   } finally {
     await release();
   }
 };
+
+async function readCapped(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel();
+      throw new Error("response too large to be a product page");
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
 
 function parseJson(text: string): unknown {
   try {
@@ -97,8 +117,9 @@ export function storeOrigin(store: string): string {
 async function storeCurrency(get: Get, storefront: string, signal?: AbortSignal): Promise<string | undefined> {
   try {
     const page = await get(`${storefront}/cart.js`, "application/json", signal);
+    if (page.status !== 200) return undefined;
     const cart = parseJson(page.body) as { currency?: unknown } | undefined;
-    return typeof cart?.currency === "string" ? cart.currency : undefined;
+    return typeof cart?.currency === "string" && cart.currency.trim() ? cart.currency : undefined;
   } catch {
     return undefined;
   }
@@ -149,8 +170,8 @@ export async function searchStore(
 
 interface ShopifyVariant {
   id: number;
-  price: number;
-  available: boolean;
+  price: unknown;
+  available: unknown;
 }
 
 interface ShopifyProduct {
@@ -164,7 +185,26 @@ function isShopifyProduct(value: unknown): value is ShopifyProduct {
   return typeof p?.title === "string" && Array.isArray(p.variants);
 }
 
-/** Read the product a URL points at, from the store itself, at this moment. */
+function shopifyOffers(variants: ShopifyVariant[], currency: string): Offer[] {
+  return variants.flatMap((v) =>
+    typeof v.price === "number" && v.price > 0 && typeof v.available === "boolean"
+      ? [{ price: v.price / 100, currency, available: v.available, variantId: String(v.id) }]
+      : [],
+  );
+}
+
+function fromPage(page: Page, fallbackUrl: string): ReadResult {
+  if (BLOCKED_STATUSES.has(page.status)) return { ok: false, failure: "blocked" };
+  if (GONE_STATUSES.has(page.status)) return { ok: false, failure: "not_found" };
+  if (page.status !== 200) return { ok: false, failure: "unreachable" };
+  const product = productFromHtml(page.body, page.url || fallbackUrl);
+  return product ? { ok: true, product } : { ok: false, failure: "not_a_product" };
+}
+
+/**
+ * Read the product a URL points at, from the store itself, at this moment. The page the person
+ * will open is always fetched too: Shopify's product JSON can outlive a page that is gone.
+ */
 export async function readProduct(get: Get, rawUrl: string, signal?: AbortSignal): Promise<ReadResult> {
   let url: URL;
   try {
@@ -174,39 +214,38 @@ export async function readProduct(get: Get, rawUrl: string, signal?: AbortSignal
   }
   if (url.protocol !== "https:") return { ok: false, failure: "not_found" };
   try {
+    const html = get(url.href, "text/html,application/xhtml+xml", signal);
     const at = url.pathname.indexOf("/products/");
     if (at >= 0) {
       const path = url.pathname.replace(/\/$/, "").replace(/\.(js|json)$/, "");
-      const storefront = `${url.origin}${url.pathname.slice(0, at)}`;
-      const [page, currency] = await Promise.all([
+      // `/en-ca/products/x` prices in that market; `/collections/c/products/x` is the root store.
+      const storefront = `${url.origin}${url.pathname.slice(0, at).replace(/\/collections\/[^/]+$/, "")}`;
+      const [json, currency, page] = await Promise.all([
         get(`${url.origin}${path}.js`, "application/json", signal),
         storeCurrency(get, storefront, signal),
+        html,
       ]);
+      if (GONE_STATUSES.has(page.status)) return { ok: false, failure: "not_found" };
       // Shopify serves this as text/javascript, so parse the body rather than trust the header.
-      const data = page.status === 200 ? parseJson(page.body) : undefined;
-      if (isShopifyProduct(data)) {
-        if (!currency) return { ok: false, failure: "unreachable" };
-        const final = new URL(page.url || `${url.origin}${path}.js`);
+      const data = json.status === 200 ? parseJson(json.body) : undefined;
+      const offers = isShopifyProduct(data) && currency ? shopifyOffers(data.variants, currency) : [];
+      if (isShopifyProduct(data) && offers.length > 0) {
+        const final = new URL(json.url || `${url.origin}${path}.js`);
         return {
           ok: true,
           product: {
             title: data.title,
             url: `${final.origin}${final.pathname.replace(/\.js$/, "")}${url.search}`,
             store: final.host,
-            currency,
             vendor: data.vendor,
-            offers: data.variants.map((v) => ({ price: v.price / 100, available: v.available, variantId: String(v.id) })),
+            offers,
           },
         };
       }
-      // Not a Shopify product endpoint: read the page itself below.
+      // Not a Shopify product endpoint, or no currency: read the page itself.
+      return fromPage(page, url.href);
     }
-    const page = await get(url.href, "text/html,application/xhtml+xml", signal);
-    if (BLOCKED_STATUSES.has(page.status)) return { ok: false, failure: "blocked" };
-    if (GONE_STATUSES.has(page.status)) return { ok: false, failure: "not_found" };
-    if (page.status !== 200) return { ok: false, failure: "unreachable" };
-    const product = productFromHtml(page.body, page.url || url.href);
-    return product ? { ok: true, product } : { ok: false, failure: "not_a_product" };
+    return fromPage(await html, url.href);
   } catch {
     return { ok: false, failure: "unreachable" };
   }
@@ -228,40 +267,38 @@ function list(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [value];
 }
 
-/** Offers with an explicit price and explicit availability; a range or a guess is not a price. */
+/** Offers with an explicit price, currency and availability; a range or a guess is not a price. */
 function offersOf(node: JsonObject): Offer[] {
   const own = list(node.offers).filter(isObject).filter((o) => hasType(o, "Offer"));
   const variants = list(node.hasVariant).filter(isObject).flatMap((v) => offersOf(v));
   const offers = own.flatMap((o): Offer[] => {
     const price = Number(o.price);
-    if (!(price > 0) || typeof o.availability !== "string") return [];
-    return [{ price, available: /InStock$/.test(o.availability) }];
+    const currency = typeof o.priceCurrency === "string" ? o.priceCurrency.trim() : "";
+    if (!(price > 0) || !currency || typeof o.availability !== "string") return [];
+    return [{ price, currency, available: /InStock$/.test(o.availability) }];
   });
   return [...offers, ...variants];
 }
 
-function currencyOf(node: JsonObject): string | undefined {
-  const offers = [node, ...list(node.hasVariant).filter(isObject)].flatMap((n) => list(n.offers).filter(isObject));
-  const currency = offers.find((o) => typeof o.priceCurrency === "string")?.priceCurrency;
-  return typeof currency === "string" ? currency : undefined;
-}
+const LISTING_TYPES = ["ItemList", "CollectionPage", "SearchResultsPage"];
 
 /**
- * The page's own Product: a top-level schema.org node (or a member of its @graph), never one
- * nested inside a list, so a collection page does not pass for a product page.
+ * The page's own Product: the one top-level schema.org Product (or member of its @graph). A page
+ * that declares itself a listing, or carries several products, is not a product page.
  */
 export function productFromHtml(html: string, pageUrl: string): Product | undefined {
-  for (const [, json] of html.matchAll(LD_JSON)) {
-    const nodes = list(parseJson(json)).filter(isObject).flatMap((n) => (Array.isArray(n["@graph"]) ? n["@graph"] : [n]));
-    for (const node of nodes.filter(isObject)) {
-      if (!hasType(node, "Product") && !hasType(node, "ProductGroup")) continue;
-      const offers = offersOf(node);
-      const currency = currencyOf(node);
-      if (typeof node.name !== "string" || offers.length === 0 || !currency) continue;
-      const url = new URL(pageUrl);
-      const brand = isObject(node.brand) ? node.brand.name : node.brand;
-      return { title: node.name, url: url.href, store: url.host, currency, vendor: typeof brand === "string" ? brand : undefined, offers };
-    }
-  }
-  return undefined;
+  const nodes = [...html.matchAll(LD_JSON)]
+    .flatMap(([, json]) => list(parseJson(json)))
+    .filter(isObject)
+    .flatMap((n) => (Array.isArray(n["@graph"]) ? n["@graph"] : [n]))
+    .filter(isObject);
+  if (nodes.some((n) => LISTING_TYPES.some((t) => hasType(n, t)))) return undefined;
+  const products = nodes.filter((n) => hasType(n, "Product") || hasType(n, "ProductGroup"));
+  if (new Set(products.map((p) => p.name)).size !== 1) return undefined;
+  const [node] = products;
+  const offers = offersOf(node);
+  if (typeof node.name !== "string" || offers.length === 0) return undefined;
+  const url = new URL(pageUrl);
+  const brand = isObject(node.brand) ? node.brand.name : node.brand;
+  return { title: node.name, url: url.href, store: url.host, vendor: typeof brand === "string" ? brand : undefined, offers };
 }

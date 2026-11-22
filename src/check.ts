@@ -30,58 +30,60 @@ export interface Checked {
 
 /** One deadline for both reads of a gift (product JSON, then the page). */
 const CHECK_DEADLINE_MS = 6000;
-const PRICE_SLACK = 0.01;
 
-function words(text: string): Set<string> {
-  return new Set(
-    text
-      .toLowerCase()
-      .normalize("NFKD")
-      .replace(/\p{M}+/gu, "")
-      .replace(/['’]/g, "")
-      .replace(/[^a-z0-9 ]+/g, " ")
-      .split(/\s+/)
-      .filter((w) => w.length > 0),
-  );
+/** Lowercase letters and digits in order, marks and symbols dropped: "Micra®" is "micra". */
+function normalize(text: string): string {
+  return text
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
+    .replace(/[™®℠'’]/g, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
 }
 
-/**
- * The listed name is the store's title, optionally with the brand in front: every word of the
- * title is in it, and it adds no word that is not the title's or the brand's.
- */
+/** The listed name is the store's own title, word for word, optionally with the brand in front. */
 export function nameMatches(listed: string, title: string, vendor = ""): boolean {
-  const said = words(listed);
-  const titleWords = words(title);
-  const allowed = new Set([...titleWords, ...words(vendor)]);
-  return titleWords.size > 0 && [...titleWords].every((w) => said.has(w)) && [...said].every((w) => allowed.has(w));
+  const said = normalize(listed);
+  const own = normalize(title);
+  return own.length > 0 && (said === own || said === `${normalize(vendor)} ${own}`);
 }
 
 function money(amount: number, currency: string): string {
   return `${currency === "USD" ? "$" : `${currency} `}${amount.toFixed(2)}`;
 }
 
+const cents = (amount: number): number => Math.round(amount * 100);
+
 export function judge(claim: Claim, product: Product): Checked {
-  const variantId = new URL(claim.url).searchParams.get("variant") ?? undefined;
-  const offers = variantId ? product.offers.filter((o) => o.variantId === variantId) : product.offers;
-  const inStock = offers.filter((o) => o.available);
-  const cheapest = Math.min(...(inStock.length > 0 ? inStock : offers).map((o) => o.price));
-  const found: Found = { title: product.title, url: product.url, price: cheapest, currency: product.currency };
-  const live = `${product.title} at ${money(cheapest, product.currency)}`;
+  const claimUrl = new URL(claim.url);
+  const variantId = claimUrl.searchParams.get("variant");
+  const hasVariants = product.offers.some((o) => o.variantId !== undefined);
+  const offers = variantId && hasVariants ? product.offers.filter((o) => o.variantId === variantId) : product.offers;
+  if (offers.length === 0) return { claim, verdict: "not_found", note: "that variant is not on the product page" };
+
+  const inCurrency = offers.filter((o) => o.currency.toUpperCase() === claim.currency.toUpperCase());
+  const inStock = inCurrency.filter((o) => o.available);
+  const shown = inStock[0] ?? inCurrency[0] ?? offers[0];
+  const found: Found = { title: product.title, url: product.url, price: shown.price, currency: shown.currency };
+  const live = `${product.title} at ${money(shown.price, shown.currency)}`;
 
   if (!nameMatches(claim.name, product.title, product.vendor))
     return { claim, verdict: "name_mismatch", found, note: `page is ${live}; list the store's own title` };
-  if (claim.currency.toUpperCase() !== product.currency.toUpperCase())
-    return { claim, verdict: "currency_mismatch", found, note: `store prices in ${product.currency}` };
+  if (inCurrency.length === 0) return { claim, verdict: "currency_mismatch", found, note: `store prices in ${shown.currency}` };
   if (inStock.length === 0) return { claim, verdict: "sold_out", found, note: `${product.title} is sold out` };
-  const match = inStock.find((o) => Math.abs(o.price - claim.price) <= PRICE_SLACK);
+  const match = inStock.find((o) => cents(o.price) === cents(claim.price));
   if (!match)
-    return {
-      claim,
-      verdict: "price_changed",
-      found,
-      note: `listed ${money(claim.price, product.currency)}, in stock from ${money(cheapest, product.currency)}`,
-    };
-  return { claim, verdict: "verified", found: { ...found, price: match.price }, note: `${product.title} at ${money(match.price, product.currency)}, in stock` };
+    return { claim, verdict: "price_changed", found, note: `listed ${money(claim.price, shown.currency)}; in stock at ${money(shown.price, shown.currency)}` };
+  // Open the link on the variant that carries this price, not whichever the store shows first.
+  const url = new URL(product.url);
+  if (match.variantId && !variantId) url.searchParams.set("variant", match.variantId);
+  return {
+    claim,
+    verdict: "verified",
+    found: { title: product.title, url: url.href, price: match.price, currency: match.currency },
+    note: `${product.title} at ${money(match.price, match.currency)}, in stock`,
+  };
 }
 
 const FAILURE_NOTES: Record<ReadFailure, string> = {

@@ -34,7 +34,7 @@ you ─► OpenClaw agent (Kimi K3.1 Pro on Cerebras)
 ```
 
 - **`shop_search`** queries stores' public product search (`/search/suggest.json`) and returns real products with absolute links, live prices, currency and stock. One call covers many stores.
-- **`check_twice`** takes the candidates the agent wants to send and re-reads each page live: Shopify product JSON first, the page's own schema.org `Product` for other stores. A gift is `verified` only when the listed name is the store's title, the price is what an in-stock variant charges now, and the currency matches. Otherwise: `price_changed`, `name_mismatch`, `currency_mismatch`, `sold_out`, `not_found`, `not_a_product`, `blocked` or `unreachable`. Every request goes through OpenClaw's SSRF guard, HTTPS only.
+- **`check_twice`** takes the candidates the agent wants to send and re-reads each page live: Shopify product JSON first, the page's own schema.org `Product` for other stores. A gift is `verified` only when its page is live, the listed name is the store's own title, and one in-stock offer charges exactly the listed price in the listed currency (the link then opens on that variant). Otherwise: `price_changed`, `name_mismatch`, `currency_mismatch`, `sold_out`, `not_found`, `not_a_product`, `blocked` or `unreachable`. Every request goes through OpenClaw's SSRF guard, HTTPS only.
 - **`speedy-shopper`** (skill) tells Kimi the loop: one wide search, seven candidates across three or more stores, one check for all seven, the first five verified make the list, printed from what the store returned.
 
 No search API key, no scraping service, no product database: the stores are the source of truth.
