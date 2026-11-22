@@ -1,0 +1,7 @@
+Write a Christmas gift list for a dad who loves fishing and coffee from these five products, checked live a moment ago. For each, one line: the name in bold, then " — price · store", then one short reason (under 12 words). No intro, no outro.
+
+1. Double Haul Rope Cap, $40.00, Simms
+2. Leatherman Micra, $49.95, Leatherman
+3. The Transit 2.0 Flip Top Mug 16 OZ, $24.00, Stanley
+4. Triple Threat Coffee Bundle, $54.99, Death Wish Coffee
+5. Original Puffy Blanket - Great Smoky, $74.96, Rumpl
