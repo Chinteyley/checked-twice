@@ -57,6 +57,16 @@ openclaw agent --local -m "Find 5 Christmas gifts for my dad. He loves fishing a
 
 Or open the Control UI (`openclaw dashboard`) and ask in the chat. `config/openclaw.json5` follows the hackathon's example config: model `moonshotai-kimi-k3.1-pro-trial`, `reasoning_effort` low, and `tools.toolSearch: false` so the agent calls the two tools directly instead of through the tool-search bridge (fewer model round trips).
 
+## Measured
+
+- **Speed Bounty run** (official speed patch on OpenClaw `8b18b55`, this plugin, Kimi K3.1 Pro on Cerebras): **530 tok/s mean · 966 p90 (server)**, five verified gifts with variant links, 1.2k output tokens, Nov 22, 2026.
+- **Writing the list, same prompt, 300 tokens, first token to last:** Cerebras 0.66 s (median of five runs) against 3.61 s on a GPU host via OpenRouter (`bench/`). During the hackathon, Cerebras' shared queue added 0 to 8 s before the first token, and an agent run's wall clock was mostly 429 retries.
+- **The checks:** a live run against six stores searched in 0.6 to 0.9 s and re-checked all six in 0.5 to 0.9 s.
+
+## Speed Bounty
+
+Apply the official patch to OpenClaw `8b18b55`, build it, merge its `dev/cerebras-kimi/openclaw.json`, then `openclaw plugins install --link <this repo> --accept-capabilities` and `openclaw config set tools.toolSearch false --strict-json`. Ask in the Control UI; the readout sits next to the composer.
+
 ## Test
 
 ```bash
